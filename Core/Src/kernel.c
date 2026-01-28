@@ -2,20 +2,24 @@
 #include <stdio.h>
 #include "stm32f4xx.h"
 
-#define STACK_SIZE 0x400
-#define MAX_STACK_SIZE 0x4000
-#define STACK_ALIGNMENT
-
-extern void runFirstThread(void);
-
-uint32_t* stackPtr;
-static uint32_t* stack_pool_base;
-static uint32_t* next_stack_top;
-static uint32_t stack_pool_used = 0;
+#define THREAD_STACK_SIZE 0x400
 
 k_thread threadArray[MAX_THREADS];
 int currentThread = -1;
 int numThreadsRunning = 0;
+uint32_t* stackPtr;
+
+// Static allocation of stacks to avoid MSP collision
+static uint32_t thread_stacks[MAX_THREADS][THREAD_STACK_SIZE / 4];
+
+extern void runFirstThread(void);
+
+void osIdleThread(void* args) {
+	while(1) {
+		// Low power mode could go here
+		__asm("wfi");
+	}
+}
 
 void SVC_Handler_Main(unsigned int *svc_args)
 {
@@ -25,117 +29,134 @@ void SVC_Handler_Main(unsigned int *svc_args)
 	switch (svc_number)
 	{
 		case YIELD:
-			_ICSR |= 1 << 28;
+			_ICSR |= 1 << 28; // Trigger PendSV
 			__asm("isb");
 			break;
-		case 17:
-			printf("Called system call 17\r\n");
-			break;
-		case 18:
-			break;
 		case 3:
-			printf("[DEBUG] Setting PSP to 0x%08X\r\n", (uint32_t)stackPtr);
 			__set_PSP((uint32_t)stackPtr);
-            printf("[DEBUG] About to run first thread\r\n");
 			runFirstThread();
 			break;
 		default:
-			printf("Unknown system call: %u\r\n", svc_number);
 			break;
 	}
 }
 
-void syscall_17(void){
-	__asm("SVC #17");
-}
-
-void syscall_18(void){
-	__asm("SVC #18");
-}
-
-uint32_t* allocate_stack(void)
+bool osCreateThread(void (*thread_function)(void*), void* args, uint32_t priority)
 {
-	if(stack_pool_base == NULL){
-		stack_pool_base = *(uint32_t**)0x0; // MSP init val
-		next_stack_top = stack_pool_base;
-	}
+	if (numThreadsRunning >= MAX_THREADS) return false;
 
+	int id = numThreadsRunning;
+	uint32_t* sp = &thread_stacks[id][(THREAD_STACK_SIZE / 4) - 1];
 
-	// return NULL if not enough space for new thread stack
-	if (stack_pool_used + STACK_SIZE > MAX_STACK_SIZE){
-	return NULL;
-	}
-
-	next_stack_top = (uint32_t*)((uint32_t)next_stack_top - STACK_SIZE);
-	stack_pool_used += STACK_SIZE;
-
-	return next_stack_top;
-}
-
-bool osCreateThread(void (*thread_function)(void*))
-{
-	// allocate stack
-	uint32_t* new_stack = allocate_stack();
-	if (new_stack == NULL){
-		printf("Failed to allocate new stack for thread. \r\n");
-		return false;
-	}
-
-	// set up initial context frame
-	uint32_t* sp = new_stack;
-
-	*(--sp) = 1 << 24; // xPSR
+	// Hardware stack frame (auto-restored by CPU)
+	*(--sp) = 1 << 24; // xPSR (Thumb bit must be set)
 	*(--sp) = (uint32_t)thread_function; // PC
-	*(--sp) = 0xA; // LR
-	*(--sp) = 0xA; // R12
-	*(--sp) = 0xA; // R3
-	*(--sp) = 0xA; // R2
-	*(--sp) = 0xA; // R1
-	*(--sp) = 0xA; // R0
+	*(--sp) = 0xFFFFFFFD; // LR (Return to Thread mode, use PSP)
+	*(--sp) = 0x12; // R12
+	*(--sp) = 0x3; // R3
+	*(--sp) = 0x2; // R2
+	*(--sp) = 0x1; // R1
+	*(--sp) = (uint32_t)args; // R0
 
+	// Software stack frame (manually restored by PendSV)
 	for (int i = 0; i < 8; i++){
-		*(--sp) = 0xA;
+		*(--sp) = 0; // R4-R11
 	}
 
-	// update kernel data structures
-	threadArray[numThreadsRunning].sp = sp;
-	threadArray[numThreadsRunning].thread_function = thread_function;
+	threadArray[id].sp = sp;
+	threadArray[id].thread_function = thread_function;
+	threadArray[id].priority = priority;
+	threadArray[id].state = READY;
+	threadArray[id].timeslice = 10; // 10ms default
+	threadArray[id].runtime = 10;
+	threadArray[id].sleep_ticks = 0;
+	
 	numThreadsRunning++;
-
-	printf("Thread created successfully\r\n");
 	return true;
 }
 
 void osKernelInitialize(void)
 {
-
-	stack_pool_base = *(uint32_t**)0x0;
-	next_stack_top = stack_pool_base;
-	stack_pool_used = 0;
+	for(int i = 0; i < MAX_THREADS; i++) {
+		threadArray[i].state = BLOCKED; // Initialize as empty
+	}
+	
 	currentThread = -1;
 	numThreadsRunning = 0;
 
-	// set priority of PendSV to almost the weakest
-	SHPR3 |= 0xFE << 16;
-	SHPR2 |= 0xFD << 24;
+	// Set priority of PendSV and SVC
+	SHPR3 |= 0xFF << 16; // PendSV = lowest priority
+	SHPR2 |= 0x00 << 24; // SVC = highest priority
 
-	printf("Kernel Initialized\r\n");
+	// Create idle thread at lowest priority
+	osCreateThread(osIdleThread, NULL, 255);
 }
 
-void osKernelStart(void){
-	currentThread = 0;
+void osKernelStart(void) {
+	osSched(); // Find first thread to run
 	stackPtr = threadArray[currentThread].sp;
 	__asm("SVC #3");
 }
 
 void osSched() {
-	threadArray[currentThread].sp = (uint32_t*)(__get_PSP() - 8*4); // save SP of current thread
-	currentThread = (currentThread+1) % numThreadsRunning; // change current thread to next thread
-	__set_PSP(threadArray[currentThread].sp); // set PSP to new current thread's stack ptr
+	// Save SP of current thread if one is running
+	if (currentThread != -1) {
+		threadArray[currentThread].sp = (uint32_t*)(__get_PSP() - 8*4);
+		if (threadArray[currentThread].state == RUNNING) {
+			threadArray[currentThread].state = READY;
+		}
+	}
+
+	// Priority-based scheduling logic
+	int highestPriority = 256;
+	int nextThread = -1;
+
+	for (int i = 0; i < numThreadsRunning; i++) {
+		if (threadArray[i].state == READY && threadArray[i].priority < highestPriority) {
+			highestPriority = threadArray[i].priority;
+			nextThread = i;
+		}
+	}
+
+	// Fallback to idle thread (should always be there)
+	if (nextThread == -1) nextThread = 0; 
+
+	currentThread = nextThread;
+	threadArray[currentThread].state = RUNNING;
+	threadArray[currentThread].runtime = threadArray[currentThread].timeslice;
+	
+	__set_PSP((uint32_t)threadArray[currentThread].sp);
 }
 
 void osYield(){
 	__asm("SVC #100");
+}
+
+void osDelay(uint32_t ms) {
+	threadArray[currentThread].state = SLEEPING;
+	threadArray[currentThread].sleep_ticks = ms;
+	osYield();
+}
+
+void osTaskTick(void) {
+	for(int i = 0; i < numThreadsRunning; i++) {
+		if (threadArray[i].state == SLEEPING) {
+			if (threadArray[i].sleep_ticks > 0) {
+				threadArray[i].sleep_ticks--;
+			}
+			if (threadArray[i].sleep_ticks == 0) {
+				threadArray[i].state = READY;
+			}
+		}
+	}
+	
+	// Preemption logic
+	if (currentThread != -1) {
+		threadArray[currentThread].runtime--;
+		if (threadArray[currentThread].runtime == 0) {
+			_ICSR |= 1 << 28; // Trigger PendSV
+		}
+	}
 }
 
 

@@ -44,6 +44,13 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart2;
 
+typedef struct {
+	int increment;
+	int multiplier;
+} thread_args_t ;
+
+uint32_t global = 0;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -64,69 +71,70 @@ int __io_putchar(int ch)
 	return ch;
 
 }
-void print_continuously1(){
-	while(1){
-		for(int i = 0; i < 20000; i++){}
-		printf("Thread 1!\r\n");
-		osYield();
-	}
+#include "sync.h"
+
+osMutex resource_mutex;
+
+void thread_high(void* args){
+	osDelay(200); // Wait for Low thread to take mutex
+	printf("[High] Trying to lock Mutex...\r\n");
+	osMutexLock(&resource_mutex);
+	printf("[High] LOCKED Mutex! Success.\r\n");
+	osDelay(500);
+	osMutexUnlock(&resource_mutex);
+	printf("[High] UNLOCKED Mutex.\r\n");
+	while(1) osDelay(1000);
 }
 
-void print_continuously2(){
-	while(1){
-		for(int i = 0; i < 20002; i++){}
-		printf("Thread 2!\r\n");
-		osYield();
+void thread_med(void* args){
+	osDelay(400); // Wait for High thread to start blocking
+	printf("[Med]  Started busy-loop (Trying to preempt Low)...\r\n");
+	// This thread will effectively "starve" Low if inheritance fails
+	uint32_t count = 0;
+	while(count < 5000000) {
+		count++;
 	}
+	printf("[Med]  Finished busy-loop.\r\n");
+	while(1) osDelay(1000);
 }
-/* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+void thread_low(void* args){
+	printf("[Low]  Locking Mutex...\r\n");
+	osMutexLock(&resource_mutex);
+	printf("[Low]  LOCKED. Starting long work (3s)...\r\n");
+	
+	// Simulate long work
+	for(int i = 0; i < 3; i++) {
+		printf("[Low]  Working... (Priority: %d)\r\n", (int)threadArray[currentThread].priority);
+		osDelay(1000);
+	}
+	
+	printf("[Low]  Work finished. Unlocking...\r\n");
+	osMutexUnlock(&resource_mutex);
+	printf("[Low]  UNLOCKED. Priority back to: %d\r\n", (int)threadArray[currentThread].priority);
+	while(1) osDelay(1000);
+}
+
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  /* USER CODE BEGIN 2 */
-  osKernelInitialize();
-  osCreateThread(print_continuously1);
-  osCreateThread(print_continuously2);
-  osKernelStart();
-  /* USER CODE END 2 */
-  printf("Setup");
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
-  }
-  /* USER CODE END 3 */
+  printf("\r\n--- RTOS Portfolio Demo (Priority Inheritance) ---\r\n");
+  
+  osKernelInitialize();
+  osMutexInit(&resource_mutex);
+
+  // Note: Priority 1 is highest, 255 is lowest (Idle)
+  osCreateThread(thread_high, NULL, 10); 
+  osCreateThread(thread_med,  NULL, 20); 
+  osCreateThread(thread_low,  NULL, 30); 
+  
+  osKernelStart();
+
+  while (1) {}
 }
 
 /**

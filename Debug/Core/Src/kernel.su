@@ -3,7 +3,8 @@
 ../Core/Src/kernel.c:52:6:syscall_18	4	static,ignoring_inline_asm
 ../Core/Src/kernel.c:56:11:allocate_stack	4	static
 ../Core/Src/kernel.c:75:6:osCreateThread	32	static
-../Core/Src/kernel.c:109:6:osKernelInitialize	8	static
-../Core/Src/kernel.c:125:6:osKernelStart	4	static,ignoring_inline_asm
-../Core/Src/kernel.c:131:6:osSched	16	static,ignoring_inline_asm
-../Core/Src/kernel.c:137:6:osYield	4	static,ignoring_inline_asm
+../Core/Src/kernel.c:111:6:osCreateThreadWithDeadline	40	static
+../Core/Src/kernel.c:148:6:osKernelInitialize	8	static
+../Core/Src/kernel.c:164:6:osKernelStart	4	static,ignoring_inline_asm
+../Core/Src/kernel.c:170:6:osSched	16	static,ignoring_inline_asm
+../Core/Src/kernel.c:180:6:osYield	4	static,ignoring_inline_asm
